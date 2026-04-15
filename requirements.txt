@@ -1,0 +1,4 @@
+pygame>=2.6
+# Optional, for plotting tune.py output:
+# matplotlib
+# pandas
