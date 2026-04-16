@@ -48,6 +48,20 @@ WIN_TEXT = (160, 255, 160)
 
 TERRAIN_COLORS = {"forest": FOREST, "water": WATER}
 
+
+def _safe_font(size: int, bold: bool = False) -> pygame.font.Font:
+    """Try a preferred monospace family; fall back to pygame's built-in
+    default if that family isn't available (e.g. under pygbag/Pyodide in
+    the browser, where system fonts may not be present)."""
+    try:
+        f = pygame.font.SysFont("menlo,monospace,courier", size, bold=bold)
+        if f is not None:
+            return f
+    except Exception:
+        pass
+    return pygame.font.Font(None, size)
+
+
 CELL = 12
 MARGIN = 8
 HISTORY_W = 260
@@ -142,13 +156,16 @@ class App:
         total_h = MARGIN * 2 + grid_h + status_h
         self.screen_size = (total_w, total_h)
 
+        print("[foodchain] pygame.init()", flush=True)
         pygame.init()
         pygame.display.set_caption("foodchain")
         self.screen = pygame.display.set_mode(self.screen_size)
-        self.font = pygame.font.SysFont("menlo,monospace", 14)
-        self.big_font = pygame.font.SysFont("menlo,monospace", 28, bold=True)
-        self.title_font = pygame.font.SysFont("menlo,monospace", 42, bold=True)
+        print("[foodchain] display set, loading fonts", flush=True)
+        self.font = _safe_font(14)
+        self.big_font = _safe_font(28, bold=True)
+        self.title_font = _safe_font(42, bold=True)
         self.clock = pygame.time.Clock()
+        print("[foodchain] App ready", flush=True)
 
         self.paused = False
         self.ticks_per_sec = 20
