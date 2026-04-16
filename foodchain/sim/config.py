@@ -67,15 +67,23 @@ PLAYER_KILLS_TO_LEVEL = (5, 10, 15, 20, 30)
 # Abilities unlocked per level (inclusive minimum level).
 PLAYER_DASH_LEVEL = 1
 PLAYER_HIDE_LEVEL = 2
-PLAYER_STRIKE_LEVEL = 3
 
 # Ability costs (energy) and tuning.
 PLAYER_DASH_ENERGY = 3
 PLAYER_DASH_RANGE = 2          # up to this many cells per dash
 PLAYER_HIDE_ENERGY = 5
 PLAYER_HIDE_DURATION = 3       # ticks of invisibility
-PLAYER_STRIKE_ENERGY = 4
-PLAYER_STRIKE_RANGE = 2        # exact distance of target
+
+# Passive progression: at each level below, the named predator becomes
+# dominated by the player. Dominated predators cannot eat the player and
+# do not see the player as prey (no chasing, no lock-on). Eating stays
+# controlled by PLAYER_TIERS (at each level the player can eat one more
+# species); dominance mirrors the food unlock on the threat side.
+PLAYER_DOMINANCE_LEVELS: dict = {
+    "stalker": 3,
+    "sprinter": 4,
+    "apex": 5,
+}
 
 
 # Two-species ecology — the tuned Phase 1 baseline. Known-good coexistence.

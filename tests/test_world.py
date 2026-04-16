@@ -290,47 +290,69 @@ def test_hide_locked_at_level_one():
     assert "locked" in (info.get("message") or "")
 
 
-def test_strike_kills_at_range_two_without_moving():
-    from foodchain.sim import Animal
-    from foodchain.sim.config import PLAYER_STRIKE_ENERGY
-    w = _lonely_player_world()
-    w.place_player(10, 10)
-    w.player.level = 3
-    start_energy = w.player.energy
-    # Hider two cells east.
-    target = Animal("hider", 12, 10, energy=10)
-    w.animals = [target]
-    w.occupied[(12, 10)] = target
-    info = w.step_with_player("strike", (1, 0))
-    assert info["ticked"] is True
-    assert info["ate"] == "hider"
-    assert w.player.pos == (10, 10)     # did not move
-    # Strike costs are additional — eating gained eat_gain=10, paid strike cost.
-    # Net should be eat_gain (+10) - strike_cost (-4) = +6
-    assert w.player.energy - start_energy == 10 - PLAYER_STRIKE_ENERGY
-
-
-def test_strike_blocked_by_forest():
+def test_dominated_stalker_cannot_eat_player():
+    """At level 3, stalkers stop being a threat — they no longer eat the
+    player even when adjacent."""
     from foodchain.sim import Animal
     w = _lonely_player_world()
     w.place_player(10, 10)
     w.player.level = 3
-    w.terrain[(11, 10)] = "forest"      # between player and target
-    target = Animal("hider", 12, 10, energy=10)
-    w.animals = [target]
-    w.occupied[(12, 10)] = target
-    info = w.step_with_player("strike", (1, 0))
-    assert info["ticked"] is False      # blocked, no turn
+    stalker = Animal("stalker", 11, 10, energy=20)
+    w.animals = [stalker]
+    w.occupied[(11, 10)] = stalker
+    # Wait a few turns — stalker is adjacent, would normally attack.
+    for _ in range(5):
+        if w.player is None:
+            break
+        w.step_with_player("wait")
+    assert w.player is not None      # survived dominated stalker
 
 
-def test_strike_no_target_no_turn():
+def test_non_dominated_stalker_still_attacks():
+    """At level 2, stalkers are still predators."""
+    from foodchain.sim import Animal
     w = _lonely_player_world()
     w.place_player(10, 10)
-    w.player.level = 3
-    before = w.tick
-    info = w.step_with_player("strike", (1, 0))
-    assert info["ticked"] is False
-    assert w.tick == before
+    w.player.level = 2
+    stalker = Animal("stalker", 11, 10, energy=20)
+    w.animals = [stalker]
+    w.occupied[(11, 10)] = stalker
+    died = False
+    for _ in range(10):
+        if w.player is None:
+            died = True
+            break
+        w.step_with_player("wait")
+    assert died, "level-2 player should be vulnerable to an adjacent stalker"
+
+
+def test_dominated_sprinter_does_not_pursue_player():
+    """At level 4, sprinter's pursue-prey logic ignores the player."""
+    from foodchain.sim import Animal
+    w = _lonely_player_world()
+    w.place_player(10, 10)
+    w.player.level = 4
+    spr = Animal("sprinter", 12, 10, energy=30)
+    w.animals = [spr]
+    w.occupied[(12, 10)] = spr
+    # Sprinter's vision scan should not see the player as prey.
+    assert w._nearest_in_vision(spr, frozenset({"player"}), 3) is None
+
+
+def test_apex_dominance_at_level_5():
+    """The payoff: at max level, apex can't eat the player."""
+    from foodchain.sim import Animal
+    w = _lonely_player_world()
+    w.place_player(10, 10)
+    w.player.level = 5
+    ap = Animal("apex", 11, 10, energy=30)
+    w.animals = [ap]
+    w.occupied[(11, 10)] = ap
+    for _ in range(10):
+        if w.player is None:
+            break
+        w.step_with_player("wait")
+    assert w.player is not None      # invincible to apex at L5
 
 
 # -------------- Phase 4 biomes -------------------------------------------
@@ -478,7 +500,8 @@ if __name__ == "__main__":
     test_hide_makes_player_invisible_at_distance_two()
     test_hide_ability_sets_flag_via_step()
     test_hide_locked_at_level_one()
-    test_strike_kills_at_range_two_without_moving()
-    test_strike_blocked_by_forest()
-    test_strike_no_target_no_turn()
+    test_dominated_stalker_cannot_eat_player()
+    test_non_dominated_stalker_still_attacks()
+    test_dominated_sprinter_does_not_pursue_player()
+    test_apex_dominance_at_level_5()
     print("ok")

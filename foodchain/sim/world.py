@@ -21,13 +21,11 @@ from foodchain.sim.config import (
     PLAYER_DASH_ENERGY,
     PLAYER_DASH_LEVEL,
     PLAYER_DASH_RANGE,
+    PLAYER_DOMINANCE_LEVELS,
     PLAYER_HIDE_DURATION,
     PLAYER_HIDE_ENERGY,
     PLAYER_HIDE_LEVEL,
     PLAYER_KILLS_TO_LEVEL,
-    PLAYER_STRIKE_ENERGY,
-    PLAYER_STRIKE_LEVEL,
-    PLAYER_STRIKE_RANGE,
     PLAYER_TIERS,
     SimConfig,
     SpeciesDef,
@@ -267,9 +265,22 @@ class World:
                 # Forest blocks sight past distance 1.
                 if d > 1 and not self._line_of_sight_clear(actor.pos, cell):
                     continue
+                # Dominated predators don't register the player as prey at all.
+                if isinstance(occ, Player) and self._player_dominates_species(actor.species):
+                    continue
                 best_dist = d
                 best_pos = cell
         return best_pos
+
+    def _player_dominates_species(self, predator_species: str) -> bool:
+        """True iff the current player has levelled past this predator's
+        dominance threshold."""
+        if self.player is None:
+            return False
+        req = PLAYER_DOMINANCE_LEVELS.get(predator_species)
+        if req is None:
+            return False
+        return self.player.level >= req
 
     def _directional_step(
         self, from_pos: Cell, to_pos: Cell, away: bool
@@ -340,19 +351,23 @@ class World:
         old = a.pos
         moved = False
 
-        # 1. Adjacent prey? Eat.
+        # 1. Adjacent prey? Eat. (Skip the player if we're dominated by them —
+        # player at required level is invisible-as-prey to this species.)
         if sdef.eats:
             for c in neigh:
                 occ = self.occupied.get(c)
-                if occ is not None and occ.species in sdef.eats and occ.energy > 0:
-                    occ.energy = 0
-                    del self.occupied[c]
-                    self._move(a, c)
-                    a.energy = min(sdef.max_energy, a.energy + sdef.eat_gain)
-                    moved = True
-                    if occ is self.player:
-                        self._player_killer = a.species
-                    break
+                if occ is None or occ.species not in sdef.eats or occ.energy <= 0:
+                    continue
+                if isinstance(occ, Player) and self._player_dominates_species(a.species):
+                    continue
+                occ.energy = 0
+                del self.occupied[c]
+                self._move(a, c)
+                a.energy = min(sdef.max_energy, a.energy + sdef.eat_gain)
+                moved = True
+                if occ is self.player:
+                    self._player_killer = a.species
+                break
 
         # 2. Adjacent grass? Eat.
         if not moved and sdef.eats_grass:
@@ -498,7 +513,6 @@ class World:
             "wait"   — no movement; one tick passes.
             "dash"   — requires direction; up to 2 cells (unlock at L1).
             "hide"   — no direction; invisible at d>1 for N ticks (unlock at L2).
-            "strike" — requires direction; kill edible prey at range 2 (unlock at L3).
 
         Returns info dict:
             {"ticked", "ate", "leveled_up", "won", "died_by", "message"}
@@ -555,39 +569,6 @@ class World:
             player.hidden_until_tick = self.tick + PLAYER_HIDE_DURATION
             info["message"] = f"hidden for {PLAYER_HIDE_DURATION} turns"
             cost = PLAYER_HIDE_ENERGY
-
-        elif action == "strike":
-            if not player.has_ability(PLAYER_STRIKE_LEVEL):
-                info["message"] = f"strike locked — reach level {PLAYER_STRIKE_LEVEL}"
-                return info
-            if direction is None:
-                raise ValueError("strike action requires direction")
-            target = self._wrap(
-                player.x + direction[0] * PLAYER_STRIKE_RANGE,
-                player.y + direction[1] * PLAYER_STRIKE_RANGE,
-            )
-            if not self._line_of_sight_clear(player.pos, target):
-                return info  # forest in the way
-            occ = self.occupied.get(target)
-            if occ is None or occ is player:
-                return info
-            if occ.species not in player.eats or occ.energy <= 0:
-                return info
-            # Kill without moving.
-            occ.energy = 0
-            del self.occupied[target]
-            player.energy = min(
-                player_sdef.max_energy,
-                player.energy + player_sdef.eat_gain,
-            )
-            player.kills += 1
-            player.meals[occ.species] = player.meals.get(occ.species, 0) + 1
-            info["ate"] = occ.species
-            if occ.species == "apex":
-                info["won"] = True
-            if self._try_level_up():
-                info["leveled_up"] = True
-            cost = PLAYER_STRIKE_ENERGY
 
         elif action in ("wait", "skip"):
             pass

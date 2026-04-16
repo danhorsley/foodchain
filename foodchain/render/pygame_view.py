@@ -17,6 +17,8 @@ kills toward the next tier.
 """
 from __future__ import annotations
 
+import asyncio
+from dataclasses import replace
 from typing import Dict, List, Optional, Tuple
 
 import pygame
@@ -24,9 +26,9 @@ import pygame
 from foodchain.sim import SimConfig, World
 from foodchain.sim.config import (
     PLAYER_DASH_LEVEL,
+    PLAYER_DOMINANCE_LEVELS,
     PLAYER_HIDE_DURATION,
     PLAYER_HIDE_LEVEL,
-    PLAYER_STRIKE_LEVEL,
 )
 
 BG = (12, 12, 16)
@@ -52,17 +54,63 @@ HISTORY_W = 260
 STATUS_H = 60           # three-line status bar in player mode (was 44)
 HISTORY_LEN = 400
 
-# Keys: 1=dash, 2=hide, 3=strike. Hide fires immediately, the other two prime
-# and wait for a direction key.
+# Keys: 1=dash, 2=hide. Hide fires immediately, dash primes and waits for
+# a direction key. L3/L4/L5 are passive "dominance" unlocks, no keybind.
 _ABILITY_KEYS = {
     pygame.K_1: "dash",
     pygame.K_2: "hide",
-    pygame.K_3: "strike",
 }
 _ABILITY_LEVEL = {
     "dash": PLAYER_DASH_LEVEL,
     "hide": PLAYER_HIDE_LEVEL,
-    "strike": PLAYER_STRIKE_LEVEL,
+}
+
+# Popup copy shown the moment the player levels up. Kept in the renderer
+# because it's pure UI — the progression mechanics themselves live in config.
+_LEVEL_UP_POPUPS = {
+    1: {
+        "title": "LEVEL 1",
+        "lines": [
+            "You can now eat hiders.",
+            "",
+            "New ability:  DASH  (press 1, then a direction)",
+            "Moves you up to 2 cells in one turn.",
+        ],
+    },
+    2: {
+        "title": "LEVEL 2",
+        "lines": [
+            "You can now eat runners.",
+            "",
+            "New ability:  HIDE  (press 2)",
+            "Invisible at range > 1 for 3 turns.",
+        ],
+    },
+    3: {
+        "title": "LEVEL 3",
+        "lines": [
+            "You can now eat stalkers.",
+            "",
+            "Stalkers will no longer attack you.",
+        ],
+    },
+    4: {
+        "title": "LEVEL 4",
+        "lines": [
+            "You can now eat sprinters.",
+            "",
+            "Sprinters will no longer attack you.",
+        ],
+    },
+    5: {
+        "title": "LEVEL 5  —  MAXED OUT",
+        "lines": [
+            "You can now eat apex predators.",
+            "",
+            "Nothing hunts you any more.",
+            "Eat an apex to win.",
+        ],
+    },
 }
 
 # dx/dy mappings for both arrow keys and WASD
@@ -82,9 +130,6 @@ class App:
     def __init__(self, cfg: SimConfig, play: bool = False):
         self.cfg = cfg
         self.play = play
-        self.world = World(cfg)
-        if play:
-            self.world.place_player()
 
         grid_w = cfg.width * CELL
         grid_h = cfg.height * CELL
@@ -95,14 +140,14 @@ class App:
         status_h = STATUS_H if play else 28
         total_w = MARGIN * 3 + grid_w + HISTORY_W
         total_h = MARGIN * 2 + grid_h + status_h
+        self.screen_size = (total_w, total_h)
 
         pygame.init()
-        pygame.display.set_caption(
-            "foodchain — play" if play else "foodchain — observer"
-        )
-        self.screen = pygame.display.set_mode((total_w, total_h))
+        pygame.display.set_caption("foodchain")
+        self.screen = pygame.display.set_mode(self.screen_size)
         self.font = pygame.font.SysFont("menlo,monospace", 14)
         self.big_font = pygame.font.SysFont("menlo,monospace", 28, bold=True)
+        self.title_font = pygame.font.SysFont("menlo,monospace", 42, bold=True)
         self.clock = pygame.time.Clock()
 
         self.paused = False
@@ -112,16 +157,31 @@ class App:
         # Player-mode state
         self.last_message: str = ""
         self.game_over: Optional[str] = None   # 'died' | 'won'
-        # "dash" or "strike" when waiting for a direction; None otherwise.
-        # Hide fires immediately so never sits in this state.
+        # "dash" when waiting for a direction; None otherwise. Hide fires
+        # immediately so never sits in this state.
         self.pending_ability: Optional[str] = None
+        # Level-up popup: non-None blocks game input until dismissed.
+        self.level_up_popup: Optional[Dict] = None
         # Run summary captured at game-over so we can still render after
         # World.player has been cleared.
         self.summary: Optional[Dict[str, object]] = None
 
+        # Welcome screen state. Play mode starts on welcome; observer skips it.
+        self.in_welcome = play
+        # Seed input buffer — string so we can show leading digits as the user types.
+        self.seed_text: str = str(cfg.seed) if cfg.seed else "0"
+
+        # World is constructed after seed is committed in play mode;
+        # observer mode uses the config seed as-is immediately.
+        self.world: Optional[World] = None
+        if not play:
+            self.world = World(cfg)
+
     # -------------------------------------------------------------- main loop
 
-    def run(self) -> None:
+    async def run(self) -> None:
+        """Async because pygbag (pygame → web via Pyodide) requires the loop
+        to yield to the browser event loop. Works identically in native Python."""
         accumulator = 0.0
         running = True
         while running:
@@ -130,9 +190,18 @@ class App:
                 if event.type == pygame.QUIT:
                     running = False
                 elif event.type == pygame.KEYDOWN:
-                    running = self._on_key(event.key)
+                    if self.in_welcome:
+                        if not self._on_welcome_key(event):
+                            running = False
+                    else:
+                        running = self._on_key(event.key)
 
-            if not self.play and not self.paused and self.game_over is None:
+            if (
+                not self.in_welcome
+                and not self.play
+                and not self.paused
+                and self.game_over is None
+            ):
                 accumulator += dt * self.ticks_per_sec
                 while accumulator >= 1.0:
                     self._observer_tick()
@@ -142,6 +211,7 @@ class App:
 
             self._draw()
             pygame.display.flip()
+            await asyncio.sleep(0)
 
         pygame.quit()
 
@@ -166,6 +236,13 @@ class App:
             if self.game_over is not None:
                 return True
 
+            # Level-up popup blocks all gameplay input until dismissed.
+            # q and ESC above are exempt (already handled) — any other key
+            # just closes the popup and takes no other action.
+            if self.level_up_popup is not None:
+                self.level_up_popup = None
+                return True
+
             # Arm / fire abilities
             if key in _ABILITY_KEYS:
                 ab = _ABILITY_KEYS[key]
@@ -184,10 +261,9 @@ class App:
             # Movement / directional trigger for pending ability
             if key in _MOVE_KEYS:
                 direction = _MOVE_KEYS[key]
-                if self.pending_ability in ("dash", "strike"):
-                    ability = self.pending_ability
+                if self.pending_ability == "dash":
                     self.pending_ability = None
-                    self._player_turn(ability, direction)
+                    self._player_turn("dash", direction)
                 else:
                     self._player_turn("move", direction)
                 return True
@@ -215,6 +291,7 @@ class App:
         self.game_over = None
         self.summary = None
         self.pending_ability = None
+        self.level_up_popup = None
 
     # -------------------------------------------------------------- turn engine
 
@@ -248,13 +325,23 @@ class App:
         if info["ate"] is not None:
             msgs.append(f"ate {info['ate']}")
         if info["leveled_up"]:
-            ability = {
-                1: "dash",
-                2: "hide",
-                3: "strike",
-            }.get(self.world.player.level)
-            tag = f" — {ability} unlocked" if ability else ""
-            msgs.append(f"level {self.world.player.level}{tag}")
+            lvl = self.world.player.level
+            dominated = next(
+                (s for s, req in PLAYER_DOMINANCE_LEVELS.items() if req == lvl), None
+            )
+            ability = {1: "dash", 2: "hide"}.get(lvl)
+            if ability:
+                tag = f" — {ability} unlocked"
+            elif dominated:
+                tag = f" — you dominate {dominated}"
+            else:
+                tag = ""
+            msgs.append(f"level {lvl}{tag}")
+            # Surface the popup so the player reads what the level-up does.
+            popup = _LEVEL_UP_POPUPS.get(lvl)
+            if popup is not None:
+                self.level_up_popup = popup
+                self.pending_ability = None   # cancel any primed ability mid-turn
         if info["won"]:
             msgs.append("you slew the apex — YOU WIN")
             self.game_over = "won"
@@ -277,15 +364,139 @@ class App:
             "cause": cause,
         }
 
+    # ----------------------------------------------------------------- welcome
+
+    def _on_welcome_key(self, event: "pygame.event.Event") -> bool:
+        """Returns False to quit the app, True to keep running."""
+        key = event.key
+        if key == pygame.K_q or key == pygame.K_ESCAPE:
+            return False
+        if key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_SPACE):
+            self._commit_seed_and_start()
+            return True
+        # Digit entry (both top-row and keypad)
+        digit = None
+        if pygame.K_0 <= key <= pygame.K_9:
+            digit = key - pygame.K_0
+        elif pygame.K_KP0 <= key <= pygame.K_KP9:
+            digit = key - pygame.K_KP0
+        if digit is not None:
+            if len(self.seed_text) < 6:
+                self.seed_text = (
+                    str(digit) if self.seed_text == "0" else self.seed_text + str(digit)
+                )
+            return True
+        if key == pygame.K_BACKSPACE:
+            self.seed_text = self.seed_text[:-1] or "0"
+            return True
+        if key == pygame.K_UP:
+            self.seed_text = str(min(999999, int(self.seed_text) + 1))
+            return True
+        if key == pygame.K_DOWN:
+            self.seed_text = str(max(0, int(self.seed_text) - 1))
+            return True
+        return True
+
+    def _commit_seed_and_start(self) -> None:
+        seed = int(self.seed_text or "0")
+        apex_count = seed % 100
+        # Clone species list, overriding apex initial_count.
+        new_species = [
+            replace(s, initial_count=apex_count) if s.name == "apex" else s
+            for s in self.cfg.species
+        ]
+        self.cfg.seed = seed
+        self.cfg.species = new_species
+        self.world = World(self.cfg)
+        if self.play:
+            self.world.place_player()
+        self.in_welcome = False
+        self.history.clear()
+        self.last_message = ""
+        self.game_over = None
+        self.summary = None
+        self.pending_ability = None
+
+    def _draw_welcome(self) -> None:
+        self.screen.fill(BG)
+        w, h = self.screen_size
+        cx = w // 2
+
+        # Title
+        title = self.title_font.render("FOOD CHAIN", True, TEXT)
+        self.screen.blit(title, title.get_rect(centerx=cx, top=48))
+
+        tagline = self.font.render(
+            "climb the chain. don't become a meal.", True, DIM_TEXT
+        )
+        self.screen.blit(tagline, tagline.get_rect(centerx=cx, top=110))
+
+        # Seed input panel
+        seed = int(self.seed_text or "0")
+        apex_count = seed % 100
+        mode = (
+            "chill mode"    if apex_count == 0
+            else "nightmare" if apex_count >= 80
+            else "spicy"     if apex_count >= 40
+            else "standard"
+        )
+        panel_top = 170
+        seed_label = self.font.render("seed", True, DIM_TEXT)
+        self.screen.blit(seed_label, seed_label.get_rect(centerx=cx, top=panel_top))
+
+        seed_surf = self.big_font.render(self.seed_text.rjust(2, "0"), True, PLAYER_RING)
+        self.screen.blit(seed_surf, seed_surf.get_rect(centerx=cx, top=panel_top + 20))
+
+        derived = self.font.render(
+            f"→ {apex_count} apex predators at start  ·  {mode}",
+            True, TEXT,
+        )
+        self.screen.blit(derived, derived.get_rect(centerx=cx, top=panel_top + 64))
+
+        # Controls block — kept terse, single-column.
+        controls = [
+            "controls",
+            "",
+            "arrows / WASD   move",
+            ".  or  SPACE    wait one turn",
+            "1               dash    (level 1)",
+            "2               hide    (level 2)",
+            "level 3+        passive: dominate predators as you climb",
+            "ESC             cancel pending ability",
+            "r               restart  ·  q  quit",
+        ]
+        y = panel_top + 110
+        for i, line in enumerate(controls):
+            color = TEXT if i == 0 else DIM_TEXT if line == "" else TEXT
+            surf = self.font.render(line, True, color)
+            self.screen.blit(surf, surf.get_rect(centerx=cx, top=y))
+            y += 18
+
+        # Input hints
+        hints = [
+            "type digits to set seed  ·  ↑↓ to nudge  ·  backspace to erase",
+            "press ENTER to begin",
+        ]
+        y += 12
+        for line in hints:
+            surf = self.font.render(line, True, DIM_TEXT)
+            self.screen.blit(surf, surf.get_rect(centerx=cx, top=y))
+            y += 18
+
     # ----------------------------------------------------------------- render
 
     def _draw(self) -> None:
+        if self.in_welcome:
+            self._draw_welcome()
+            return
         self.screen.fill(BG)
         self._draw_grid()
         self._draw_history()
         self._draw_status()
         if self.game_over is not None:
             self._draw_gameover_banner()
+        elif self.level_up_popup is not None:
+            self._draw_level_up_popup()
 
     def _draw_grid(self) -> None:
         pygame.draw.rect(self.screen, GRID_EMPTY, self.grid_rect)
@@ -363,18 +574,29 @@ class App:
         counts = self.world.counts()
         y = MARGIN + self.cfg.height * CELL + 6
 
-        # Line 1 — always shown: tick + ecology
-        parts = [f"tick {self.world.tick:>5}", f"grass {counts['grass']:>4}"]
+        # Line 1 — tick + ecology counts with a colour swatch per species so
+        # the player can map "that purple square in the status bar" onto "those
+        # purple squares on the grid."
+        x = MARGIN
+        tick_surf = self.font.render(f"tick {self.world.tick:>5}", True, TEXT)
+        self.screen.blit(tick_surf, (x, y))
+        x += tick_surf.get_width() + 18
+
+        x = self._blit_swatch_and_label(x, y, GRASS, f"grass {counts['grass']:>4}")
         for sdef in self.cfg.species:
             if sdef.name == "player":
                 continue
-            parts.append(f"{sdef.name[:4]} {counts[sdef.name]:>3}")
+            x = self._blit_swatch_and_label(
+                x, y, sdef.color, f"{sdef.name[:4]} {counts[sdef.name]:>3}"
+            )
+
         if not self.play:
-            parts.append(f"{self.ticks_per_sec} tps")
+            tps_surf = self.font.render(f"{self.ticks_per_sec} tps", True, TEXT)
+            self.screen.blit(tps_surf, (x, y))
+            x += tps_surf.get_width() + 18
             if self.paused:
-                parts.append("PAUSED")
-        line1 = "   ".join(parts)
-        self.screen.blit(self.font.render(line1, True, TEXT), (MARGIN, y))
+                p_surf = self.font.render("PAUSED", True, TEXT)
+                self.screen.blit(p_surf, (x, y))
 
         # Line 2 — player mode only: player stats
         if self.play and self.world.player is not None:
@@ -383,9 +605,14 @@ class App:
             prog = f"{p.kills}/{target}" if target else "MAX"
             hide_ticks = max(0, p.hidden_until_tick - self.world.tick)
             hide_tag = f"  HIDDEN {hide_ticks}t" if hide_ticks > 0 else ""
+            dominated = [
+                name for name, req in PLAYER_DOMINANCE_LEVELS.items()
+                if p.level >= req
+            ]
+            dom_tag = f"  dominates: {', '.join(dominated)}" if dominated else ""
             status = (
                 f"energy {p.energy:>3}   level {p.level}   kills {prog}"
-                f"{hide_tag}"
+                f"{hide_tag}{dom_tag}"
             )
             self.screen.blit(self.font.render(status, True, TEXT), (MARGIN, y + 18))
 
@@ -394,6 +621,18 @@ class App:
         elif self.play and self.last_message:
             self.screen.blit(self.font.render(self.last_message, True, TEXT), (MARGIN, y + 18))
 
+    def _blit_swatch_and_label(
+        self, x: int, y: int, color: tuple, text: str
+    ) -> int:
+        """Draw a colour square followed by text. Returns the next free x."""
+        swatch = 10
+        swatch_y = y + max(0, (self.font.get_height() - swatch) // 2) + 2
+        pygame.draw.rect(self.screen, color, (x, swatch_y, swatch, swatch))
+        x += swatch + 4
+        surf = self.font.render(text, True, TEXT)
+        self.screen.blit(surf, (x, y))
+        return x + surf.get_width() + 18
+
     def _draw_ability_bar(self, y: int) -> None:
         """Row of [1] dash [2] hide [3] strike, dimmed if locked, highlighted
         if primed. Appended with the latest flash message."""
@@ -401,7 +640,7 @@ class App:
         if p is None:
             return
         x = MARGIN
-        for key_label, ability in (("1", "dash"), ("2", "hide"), ("3", "strike")):
+        for key_label, ability in (("1", "dash"), ("2", "hide")):
             unlocked = p.level >= _ABILITY_LEVEL[ability]
             primed = self.pending_ability == ability
             if primed:
@@ -494,6 +733,54 @@ class App:
             y += line_h
         y += pad
 
+        self.screen.blit(
+            hint_surf,
+            hint_surf.get_rect(centerx=bg_rect.centerx, top=y),
+        )
+
+    def _draw_level_up_popup(self) -> None:
+        """Modal overlay shown on level-up. Any keypress dismisses it."""
+        popup = self.level_up_popup
+        if popup is None:
+            return
+
+        title_surf = self.big_font.render(popup["title"], True, WIN_TEXT)
+        line_surfs = [self.font.render(ln, True, TEXT) for ln in popup["lines"]]
+        hint_surf = self.font.render("press any key to continue", True, DIM_TEXT)
+
+        pad = 20
+        line_h = self.font.get_linesize()
+        content_w = max(
+            [title_surf.get_width(), hint_surf.get_width()]
+            + [ls.get_width() for ls in line_surfs]
+        )
+        content_h = (
+            title_surf.get_height()
+            + pad
+            + line_h * len(line_surfs)
+            + pad
+            + hint_surf.get_height()
+        )
+        panel_w = content_w + pad * 2
+        panel_h = content_h + pad * 2
+
+        bg = pygame.Surface((panel_w, panel_h))
+        bg.set_alpha(225)
+        bg.fill((0, 0, 0))
+        bg_rect = bg.get_rect(center=self.grid_rect.center)
+        self.screen.blit(bg, bg_rect)
+        pygame.draw.rect(self.screen, WIN_TEXT, bg_rect, 1)
+
+        y = bg_rect.top + pad
+        self.screen.blit(
+            title_surf,
+            title_surf.get_rect(centerx=bg_rect.centerx, top=y),
+        )
+        y += title_surf.get_height() + pad
+        for ls in line_surfs:
+            self.screen.blit(ls, (bg_rect.left + pad, y))
+            y += line_h
+        y += pad
         self.screen.blit(
             hint_surf,
             hint_surf.get_rect(centerx=bg_rect.centerx, top=y),

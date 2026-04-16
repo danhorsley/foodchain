@@ -1,4 +1,8 @@
 pygame>=2.6
-# Optional, for plotting tune.py output:
+
+# Optional, for headless tuning plots:
 # matplotlib
 # pandas
+
+# Optional, for building the browser (WebAssembly) version for itch.io:
+# pygbag
