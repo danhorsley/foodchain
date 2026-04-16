@@ -48,10 +48,28 @@ For watching the ecology without a player:
 ## Ship to itch.io (browser build)
 
     pip install pygbag
-    pygbag main.py
+    python -m pygbag --build --archive --app_name foodchain --title "Food Chain" \
+        --package foodchain --template pygbag/default.tmpl main.py
 
-This builds `build/web/` — zip its contents and upload to itch.io as an
-HTML5 project. The main loop is already async-aware.
+This produces:
+
+* `build/web/` — standalone folder (can be hosted anywhere)
+* `build/web.zip` — single archive ready for itch.io upload
+
+Upload `build/web.zip` as an HTML5 project on itch.io. Tick *"This file
+will be played in the browser"*. Viewport `1004 × 556` matches the pygame
+window tightly.
+
+To test locally before uploading:
+
+    python -m pygbag --template pygbag/default.tmpl main.py
+
+Then open `http://localhost:8000`.
+
+> The `pygbag/default.tmpl` override is needed because the pygbag 0.9.3
+> upstream template references a `browserfs.min.js` file that no longer
+> exists on the CDN, which 404s in the browser. Our local copy has that
+> line removed. See `pygbag.ini` for build-time file-exclusion rules.
 
 ## Layout
     foodchain/sim/        headless sim core (no pygame)
