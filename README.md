@@ -48,28 +48,32 @@ For watching the ecology without a player:
 ## Ship to itch.io (browser build)
 
     pip install pygbag
-    python -m pygbag --build --archive --app_name foodchain --title "Food Chain" \
-        --package foodchain --template pygbag/default.tmpl main.py
+    ./scripts/build-web.sh
 
-This produces:
+This produces `build/web.zip` ready for upload. Upload it on itch.io as
+an HTML5 project, tick *"This file will be played in the browser"*, and
+set viewport to `1004 × 556`.
 
-* `build/web/` — standalone folder (can be hosted anywhere)
-* `build/web.zip` — single archive ready for itch.io upload
-
-Upload `build/web.zip` as an HTML5 project on itch.io. Tick *"This file
-will be played in the browser"*. Viewport `1004 × 556` matches the pygame
-window tightly.
-
-To test locally before uploading:
+Test locally before uploading:
 
     python -m pygbag --template pygbag/default.tmpl main.py
 
 Then open `http://localhost:8000`.
 
-> The `pygbag/default.tmpl` override is needed because the pygbag 0.9.3
-> upstream template references a `browserfs.min.js` file that no longer
-> exists on the CDN, which 404s in the browser. Our local copy has that
-> line removed. See `pygbag.ini` for build-time file-exclusion rules.
+### Why a build script instead of plain `pygbag main.py`
+
+Three pygbag 0.9.3 quirks the script papers over:
+
+1. `pygbag --archive` only bundles `index.html`, `favicon.png`, and
+   `foodchain.apk` into `web.zip`. The browser runtime also requests
+   `foodchain.tar.gz` as an apk-parse fallback — without it, an apk
+   parse failure gives a silent blank screen. The script appends the
+   tar.gz after pygbag finishes.
+2. The stock template references `/browserfs.min.js` which no longer
+   exists on the CDN (404 in browser). Our `pygbag/default.tmpl` has
+   that line removed; `--template` points pygbag at it.
+3. Under pygbag, `main.py`'s directory isn't on `sys.path` by default,
+   so package imports silently fail. `main.py` inserts the dir itself.
 
 ## Layout
     foodchain/sim/        headless sim core (no pygame)
