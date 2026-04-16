@@ -13,11 +13,20 @@ Browser (via pygbag):
     reading sys.argv in the browser can silently SystemExit in some setups.
 """
 import asyncio
+import os
 import sys
 
 # Prints to stdout show up in the browser DevTools console under pygbag —
 # these give us boot milestones so a blank screen isn't a total mystery.
 print("[foodchain] boot: importing app", flush=True)
+
+# Under pygbag, main.py's directory isn't automatically on sys.path (unlike
+# native `python main.py`). Our `from foodchain.render...` imports then fail
+# silently. Adding the dir here makes the package importable in both runtimes.
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+if _THIS_DIR not in sys.path:
+    sys.path.insert(0, _THIS_DIR)
+    print(f"[foodchain] sys.path += {_THIS_DIR}", flush=True)
 
 from foodchain.render.pygame_view import App
 from foodchain.sim import SimConfig
