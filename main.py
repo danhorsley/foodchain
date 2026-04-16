@@ -16,6 +16,13 @@ import asyncio
 import os
 import sys
 
+# NB: pygbag's dependency scanner only looks for `import pygame` in THIS file
+# to decide whether to pull the pygame-ce wheel into the browser bundle.
+# Transitive imports (ours live inside foodchain.render) aren't detected and
+# the browser runtime silently refuses to start the script. Keeping this
+# import at module level is load-bearing for the web build.
+import pygame  # noqa: F401  — load-bearing for pygbag dep detection
+
 # Prints to stdout show up in the browser DevTools console under pygbag —
 # these give us boot milestones so a blank screen isn't a total mystery.
 print("[foodchain] boot: importing app", flush=True)
